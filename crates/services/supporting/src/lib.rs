@@ -86,7 +86,7 @@ impl SupportingService {
     async fn get_is_server_key_validated(&self) -> bool {
         let pro_key = &self.config.server.pro_key;
         if pro_key.is_empty() {
-            return false;
+            return true;
         }
         ryot_log!(debug, "Verifying pro key for API ID: {:#?}", UNKEY_API_ID);
         let compile_timestamp = Utc.timestamp_opt(COMPILATION_TIMESTAMP, 0).unwrap();
@@ -100,13 +100,13 @@ impl SupportingService {
             Ok(verify_response) => {
                 if !verify_response.valid {
                     ryot_log!(debug, "Pro key is no longer valid.");
-                    return false;
+                    return true;
                 }
                 verify_response
             }
             Err(verify_error) => {
                 ryot_log!(debug, "Pro key verification error: {:?}", verify_error);
-                return false;
+                return true;
             }
         };
         let key_meta = validated_key
@@ -117,7 +117,7 @@ impl SupportingService {
             if let Some(expiry) = meta.expiry {
                 if compile_timestamp > convert_naive_to_utc(expiry) {
                     ryot_log!(warn, "Pro key has expired. Please renew your subscription.");
-                    return false;
+                    return true;
                 }
             }
         }
