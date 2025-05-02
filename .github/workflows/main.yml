@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 env:
+  # Seule la registry GitHub Container Registry est conservée
   GHCR_REGISTRY: ghcr.io
-  DOCKER_USERNAME: charlesflc
 
 jobs:
   pre-workflow-checks:
@@ -31,14 +31,14 @@ jobs:
 
       - name: Set outputs
         id: set_outputs
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             const repositoryName = context.payload.repository.name;
             const owner = context.repo.owner;
             const ghcrRegistry = process.env.GHCR_REGISTRY;
 
-            // On ne génère plus que les noms GHCR
+            // On ne garde que les images destinées à GHCR
             let imageNames = [
               `name=${ghcrRegistry}/${owner}/${repositoryName}`,
               `name=${ghcrRegistry}/${owner}/${repositoryName}-pro`,
@@ -60,14 +60,16 @@ jobs:
 
             core.setOutput('should-run', shouldRun);
 
-            const shouldRelease = (context.eventName === "push" && context.ref.startsWith("refs/tags/")) ? 'true' : 'false';
+            const shouldRelease =
+              context.eventName === "push" && context.ref.startsWith("refs/tags/")
+                ? 'true'
+                : 'false';
             core.setOutput('should-release', shouldRelease);
 
             core.setOutput('image-names', imageNames.join('\n'));
 
   create-release:
-    needs:
-      - pre-workflow-checks
+    needs: [pre-workflow-checks]
     if: needs.pre-workflow-checks.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -80,7 +82,7 @@ jobs:
 
       - name: Generate changelog
         id: changelog
-        uses: metcalfc/changelog-generator@v1
+        uses: metcalfc/changelog-generator@v4
         with:
           myToken: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,8 +98,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-backend:
-    needs:
-      - pre-workflow-checks
+    needs: [pre-workflow-checks]
     if: needs.pre-workflow-checks.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -106,6 +107,7 @@ jobs:
         platform:
           - target: x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,17 +126,17 @@ jobs:
         run: |
           echo "channel=$(grep channel rust-toolchain.toml | awk -F' = ' '{printf $2}' | tr -d '"')" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.platform.target }}
 
-      - uses: Swatinem/rust-cache@v9
+      - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.platform.target }}-${{ steps.build.outputs.profile }}
           save-if: ${{ github.event_name != 'pull_request' }}
 
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: target
           key: cargo-build-${{ runner.os }}-${{ matrix.platform.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
@@ -142,7 +144,7 @@ jobs:
             cargo-build-${{ runner.os }}-${{ matrix.platform.target }}-
 
       - name: Install cross
-        uses: taiki-e/cache-cargo-install-action@v4
+        uses: taiki-e/cache-cargo-install-action@v1
         with:
           tool: cross
           git: https://github.com/cross-rs/cross
@@ -160,48 +162,46 @@ jobs:
           cross build --locked --target ${{ matrix.platform.target }} --release
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: backend-${{ steps.build.outputs.docker-arch }}
           path: ${{ github.workspace }}/target/${{ matrix.platform.target }}/release/backend
           retention-days: 1
 
   build-docker:
-    needs:
-      - pre-workflow-checks
-      - build-backend
+    needs: [pre-workflow-checks, build-backend]
     if: needs.pre-workflow-checks.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Download build artifact for docker
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: ${{ github.workspace }}/artifact/
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the GHCR container registry
-        uses: docker/login-action@v2
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ---- Aucune connexion à Docker Hub, publication exclusive sur GHCR ----
+
       - name: Extract metadata for Docker
         id: meta
-        uses: docker/metadata-action@v3
+        uses: docker/metadata-action@v5
         with:
           images: ${{ needs.pre-workflow-checks.outputs.image-names }}
           tags: |
@@ -213,8 +213,8 @@ jobs:
             type=raw,value=latest,enable=${{ needs.pre-workflow-checks.outputs.should-release == 'true' }}
             type=sha
 
-      - name: Build and push
-        uses: docker/build-push-action@v4
+      - name: Build and push (GHCR only)
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
